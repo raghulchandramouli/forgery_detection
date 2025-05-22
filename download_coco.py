@@ -21,24 +21,25 @@ def download_and_extract_zip(url, output_path, extract_dir):
     else:
         print(f"Zip file already exists at {output_path}. Skipping download.")
 
-    # Check if extract_dir exists and contains files (assuming extraction was done)
-    # A more robust check might be needed depending on expected contents
-    if not os.path.exists(extract_dir) or not os.listdir(extract_dir):
-        print(f"Extracting zip file {os.path.basename(output_path)} to {extract_dir}...")
-        try:
-            with zipfile.ZipFile(output_path, 'r') as zip_ref:
-                zip_ref.extractall(extract_dir)
-            print("Zip file extracted successfully.")
-            return True
-        except zipfile.BadZipFile:
-             print(f"Error: The downloaded file {output_path} is not a valid zip file.")
-             return False
-        except Exception as e:
-            print(f"Error extracting zip file {output_path}: {e}")
-            return False
-    else:
+    # Check if extract_dir exists and is not empty
+    if os.path.exists(extract_dir) and os.listdir(extract_dir):
         print(f"Extraction directory {extract_dir} is not empty. Skipping extraction.")
-        return True # Assume extraction was done previously if directory exists and is not empty
+        return True # Assume extraction was done previously
+
+    # If directory doesn't exist or is empty, proceed with extraction
+    print(f"Extracting zip file {os.path.basename(output_path)} to {extract_dir}...")
+    os.makedirs(extract_dir, exist_ok=True) # Ensure the directory exists before extracting
+    try:
+        with zipfile.ZipFile(output_path, 'r') as zip_ref:
+            zip_ref.extractall(extract_dir)
+        print("Zip file extracted successfully.")
+        return True
+    except zipfile.BadZipFile:
+         print(f"Error: The downloaded file {output_path} is not a valid zip file.")
+         return False
+    except Exception as e:
+        print(f"Error extracting zip file {output_path}: {e}")
+        return False
 
 
 def download_coco_images(output_dir='coco_dataset'):
