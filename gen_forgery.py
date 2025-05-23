@@ -95,3 +95,104 @@ def create_inpainting_forgery(
         return False
     
 # helper function to create-copy-move forgery
+def create_copy_move_forgery(
+    image_path, output_path  
+):
+    
+    """
+    Creates a copy-move forgery of the given image using OpenCV.
+    Copies a random area and moves it to a random position.
+    """
+    
+    try:
+        img = cv2.imread(image_path)
+        if img is None:
+            print(f"Error reading image {image_path}. Skipping copy-move forgery creation.")
+            return False
+        
+        h, w, _ = img.shape
+        if h < 100 or w < 100:
+            print(f"Image {image_path} is too small. Skipping copy-move forgery creation.")
+            return False
+        
+        patch_size = min(h, w) // 10
+        if patch_size < 20: patch_size = 20 # Minimum patch size
+        
+        # Randomly select a region to copy
+        src_x1 = random.randint(0, w - patch_size)
+        src_y1 = random.randint(0, h - patch_size)
+        src_x2 = src_x1 + patch_size
+        src_y2 = src_y1 + patch_size
+        
+        # Randomly select a position to move the copied region
+        while True:
+            dst_x1 = random.randint(0, w - patch_size)
+            dst_y1 = random.randint(0, h - patch_size)
+            dst_x2 = dst_x1 + patch_size
+            dst_y2 = dst_y1 + patch_size
+            
+            # check for overlap or proximity
+            if (
+                abs(dst_x1 - src_x1) > patch_size
+                or abs(dst_y1 - src_y1) > patch_size
+            ):
+                break # found a valid position
+            
+        patch = img[src_y1:src_y2, src_x1:src_x2].copy()
+        img[dst_y1:dst_y2, dst_x1:dst_x2] = patch
+        
+        cv2.imwrite(output_path, img)
+        return True
+
+    except Exception as e:
+        print(f"Error creating copy-move forgery: {e}")
+        return False
+    
+def generate_forged_dataset(
+  input_dir,
+  output_dir,
+  num_forgeries_per_image=1  
+):
+    
+    """
+    Generates forgeries for the given dataset.
+    
+    Args:
+        input_dir (str): Path to the input directory containing real images.
+        output_dir (str): Path to the output directory where forgeries will be saved.
+        num_forgeries_per_image (int): Number of forgeries to generate per real image.
+    """
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    clean_output_dir = os.path.join(output_dir, 'clean')
+    forget_output_dir = os.path.join(output_dir, 'forged')
+
+    os.makedirs(clean_output_dir, exist_ok=True)
+    os.makedirs(forget_output_dir, exist_ok=True)
+    
+    image_files = [
+        f for f in os.listdir(input_dir) if f.endswith(('.jpg', '.jpeg', '.png'))
+    ]
+    
+    random.shuffle(image_files)
+    
+    list_file_path = os.path.join(output_dir, 'list.txt')
+    
+    with open(list_file_path, 'w') as f:
+        for i, image_files in ennumerate(image_files):
+            input_image_path = os.path.join(input_dir, image_files)
+            base_name, ext = os.path.splitext(clean_output_dir, image_files)
+            
+            # 1. save clean image
+            clean_output_name = f"{base_name}_clean{ext}"
+            clean_image_path = os.path.join(clean_output_dir, clean_output_name)
+            
+            if not os.path.exists(clean_image_path):
+                shutil.copy(input_image_path, clean_image_path)
+                
+            f.write(f"{os.path.relpath(clean_image_path, output_dir)}0\n") # 0 for clean image
+
+            # 2. generate forgeries and save them as well:
+            
+            
