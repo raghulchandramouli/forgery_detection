@@ -56,3 +56,42 @@ def create_inpainting_forgery(
         
         mask = Image.new("RGB", (w, h), 0) # setting color for black background
         mask_draw = ImageDraw.Draw(mask)
+        
+        # define mask size (e.g., 1/5th of the image) so if Image size is 512, then mask size will be 102.4
+        mask_w = random.randint(w // 10, w // 4) # random mask size between 1/5th and 1/2th of the image width
+        mask_h = random.randint(h // 10, h // 4) # random mask size between 1/5th and 1/2th of the image height
+        
+        # Randomly select a region to inpaint
+        mask_x1 = random.randint(0, w - mask_w) 
+        mask_y1 = random.randint(0, h - mask_h)   
+        mask_x2 = mask_x1 + mask_w
+        mask_y2 = mask_y1 + mask_h
+
+        mask_draw.rectangle([mask_x1, mask_y1, mask_x2, mask_y2], fill=255) # setting color for white mask
+        
+        # prompt:
+        prompt = "A photo realistic image that blends in with the background"
+        
+        # Resizing the image to fit the inpainting model guidelines
+        input_img_resized = img.resize((512, 512))
+        mask_resized = mask.resize((512, 512))
+        
+        # Inpainting the masked region
+        inpainted_image = inpaint_pipe(
+            prompt=prompt,
+            image=input_img_resized,
+            mask_image=mask_resized,
+            num_inference_steps=50,
+            
+        ).images[0]
+        
+        inpainted_image = inpainted_image.resize((w, h))
+
+        inpainted_image.save(output_path)
+        return True
+    
+    except Exception as e:
+        print(f"Error creating inpainting forgery: {e}")
+        return False
+    
+# helper function to create-copy-move forgery
