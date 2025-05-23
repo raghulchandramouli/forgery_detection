@@ -6,4 +6,5 @@
                           create_inpainting_forgery
                           generate_forgery
                           )
+                          
 5. Dir container - (forged_data/clean , forged_data/forged)
