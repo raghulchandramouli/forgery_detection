@@ -2,231 +2,198 @@ import os
 import random
 import shutil
 import argparse
-from PIL import Image, ImageDraw # Import ImageDraw
+from PIL import Image, ImageDraw
 import cv2
 import numpy as np
 import torch
 from diffusers import StableDiffusionInpaintPipeline
-from transformers import pipeline
+import gc
 
-# Set device
+# ============================== #
+#     CONFIG / DEVICE SETUP     #
+# ============================== #
 device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Using device: {device}")
+print(f"[INFO] Using device: {device}")
 
-# Load models
-# Stable diffusion Inpainting Model.
+# ============================== #
+#   LOAD INPAINTING MODEL       #
+# ============================== #
+def load_inpainting_model():
+    try:
+        # Clear CUDA cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
+        
+        pipe = StableDiffusionInpaintPipeline.from_pretrained(
+            "runwayml/stable-diffusion-v1-5",
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            safety_checker=None,
+        ).to(device)
+        
+        # Enable memory efficient attention
+        pipe.enable_attention_slicing()
+        if torch.cuda.is_available():
+            pipe.enable_model_cpu_offload()
+        
+        print("[INFO] Inpainting model loaded successfully.")
+        return pipe
+    except Exception as e:
+        print(f"[WARNING] Failed to load inpainting model: {e}")
+        return None
 
-try:
-    inpaint_pipe = StableDiffusionInpaintPipeline.from_pretrained(
-        "stabilityai/stable-diffusion-2-inpainting",
-        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-    ).to(device)
 
-    print("Inpainting model loaded successfully.")
-
-except Exception as e:
-    print(f"Error loading inpainting model: {e}")
-    inpaint_pipe = None # setting it to None if there's an error, and loading fails
-
-
-print("Using OpenCV for copy-move forgery simulation")
-
-# helper function to create-inpainting-forgery
-def create_inpainting_forgery(
-    image_path, output_path
-):
-
-    """
-    Creates an inpainting forgery of the given image using stable diffusion.
-    Selects a random area and inpaints it.
-    """
-
-    if inpaint_pipe is None:
-        print("Inpainting model not loaded. Skipping inpainting forgery creation.")
+def create_inpainting_forgery(image_path, output_path, pipe):
+    if pipe is None:
+        print("[SKIP] Inpainting model not loaded.")
         return False
 
     try:
-        img = Image.open(image_path)
-        img = img.convert("RGB")
+        img = Image.open(image_path).convert("RGB")
         w, h = img.size
-
-        if h < 128 or w < 128:
-            # skips small images is does not meet the size requirement.
-            print(f"Image {image_path} is too small. Skipping inpainting forgery creation.")
+        if w < 128 or h < 128:
+            print(f"[SKIP] Image too small for inpainting: {image_path}")
             return False
 
-        mask = Image.new("L", (w, h), 0) # setting color for black background, use "L" for grayscale mask
-        mask_draw = ImageDraw.Draw(mask)
+        # Create random mask
+        mask = Image.new("L", (w, h), 0)
+        draw = ImageDraw.Draw(mask)
+        mask_w = random.randint(w // 8, w // 4)
+        mask_h = random.randint(h // 8, h // 4)
+        x1 = random.randint(0, w - mask_w)
+        y1 = random.randint(0, h - mask_h)
+        draw.rectangle([x1, y1, x1 + mask_w, y1 + mask_h], fill=255)
 
-        # define mask size (e.g., 1/5th of the image) so if Image size is 512, then mask size will be 102.4
-        mask_w = random.randint(w // 10, w // 4) # random mask size between 1/10th and 1/4th of the image width
-        mask_h = random.randint(h // 10, h // 4) # random mask size between 1/10th and 1/4th of the image height
+        # Resize for model (512x512 is optimal for SD 1.5)
+        target_size = 512
+        img_resized = img.resize((target_size, target_size), Image.Resampling.LANCZOS)
+        mask_resized = mask.resize((target_size, target_size), Image.Resampling.LANCZOS)
 
-        # Randomly select a region to inpaint
-        mask_x1 = random.randint(0, w - mask_w)
-        mask_y1 = random.randint(0, h - mask_h)
-        mask_x2 = mask_x1 + mask_w
-        mask_y2 = mask_y1 + mask_h
+        # Generate inpainting with prompts optimized for SD 1.5
+        prompts = [
+            "a detailed photograph, highly realistic, professional",
+            "a clear photo with natural lighting and perfect details",
+            "photorealistic image with high fidelity",
+        ]
+        
+        with torch.inference_mode():
+            result = pipe(
+                prompt=random.choice(prompts),
+                image=img_resized,
+                mask_image=mask_resized,
+                num_inference_steps=50,  # Reduced steps for faster generation
+                guidance_scale=7.5,
+            ).images[0]
 
-        mask_draw.rectangle([mask_x1, mask_y1, mask_x2, mask_y2], fill=255) # setting color for white mask
-
-        # prompt:
-        prompt = "A photo realistic image that blends in with the background"
-
-        # Resizing the image to fit the inpainting model guidelines
-        # Stable Diffusion 2 Inpainting model expects 768x768
-        input_img_resized = img.resize((768, 768))
-        mask_resized = mask.resize((768, 768))
-
-        # Inpainting the masked region
-        inpainted_image = inpaint_pipe(
-            prompt=prompt,
-            image=input_img_resized,
-            mask_image=mask_resized,
-            num_inference_steps=50,
-
-        ).images[0]
-
-        inpainted_image = inpainted_image.resize((w, h))
-
-        inpainted_image.save(output_path)
+        # Resize back to original size
+        result = result.resize((w, h), Image.Resampling.LANCZOS)
+        result.save(output_path, quality=95)
+        print(f"[SUCCESS] Created inpainting forgery: {output_path}")
         return True
 
     except Exception as e:
-        print(f"Error creating inpainting forgery: {e}")
+        print(f"[ERROR] Inpainting failed for {image_path}: {e}")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
         return False
 
-# helper function to create-copy-move-forgery
+
+
 def create_copy_move_forgery(image_path, output_path):
-    """
-    Creates a simple copy-move forgery using OpenCV.
-    Copies a random patch from the image and pastes it elsewhere.
-    """
     try:
         img = cv2.imread(image_path)
         if img is None:
-            print(f"Warning: Could not read image {image_path}. Skipping copy-move.")
+            print(f"[SKIP] Can't read image: {image_path}")
             return False
 
         h, w, _ = img.shape
-        if h < 100 or w < 100: # Skip very small images
-             print(f"Warning: Image {image_path} is too small for copy-move. Skipping.")
-             return False
+        if min(h, w) < 100:
+            print(f"[SKIP] Image too small for copy-move: {image_path}")
+            return False
 
-        # Define patch size (e.g., 1/10th of the smaller dimension)
-        patch_size = min(h, w) // 10
-        if patch_size < 20: patch_size = 20 # Minimum patch size
+        patch_size = max(20, min(h, w) // 10)
+        src_x, src_y = random.randint(0, w - patch_size), random.randint(0, h - patch_size)
+        dst_x, dst_y = src_x, src_y
 
-        # Randomly select source patch coordinates
-        src_x1 = random.randint(0, w - patch_size)
-        src_y1 = random.randint(0, h - patch_size)
-        src_x2 = src_x1 + patch_size
-        src_y2 = src_y1 + patch_size
+        while abs(dst_x - src_x) < patch_size and abs(dst_y - src_y) < patch_size:
+            dst_x = random.randint(0, w - patch_size)
+            dst_y = random.randint(0, h - patch_size)
 
-        # Randomly select destination patch coordinates (ensure not too close to source)
-        # Simple check: ensure destination is at least patch_size away from source
-        while True:
-            dst_x1 = random.randint(0, w - patch_size)
-            dst_y1 = random.randint(0, h - patch_size)
-            dst_x2 = dst_x1 + patch_size
-            dst_y2 = dst_y1 + patch_size
-
-            # Check for overlap or proximity
-            if (abs(dst_x1 - src_x1) > patch_size or abs(dst_y1 - src_y1) > patch_size):
-                 break # Found a suitable destination
-
-        # Copy the patch
-        patch = img[src_y1:src_y2, src_x1:src_x2].copy()
-
-        # Paste the patch
-        img[dst_y1:dst_y2, dst_x1:dst_x2] = patch
-
-        # Simple blending at the edges of the pasted patch for basic harmonization
-        # This is a very basic approach; a real GAN would do this much better
-        # You could add more sophisticated blending here if needed
-        # For now, we just paste directly.
+        patch = img[src_y:src_y + patch_size, src_x:src_x + patch_size].copy()
+        img[dst_y:dst_y + patch_size, dst_x:dst_x + patch_size] = patch
 
         cv2.imwrite(output_path, img)
         return True
 
     except Exception as e:
-        print(f"Error creating copy-move for {image_path}: {e}")
+        print(f"[ERROR] Copy-move failed for {image_path}: {e}")
         return False
 
 
-def generate_forged_dataset(input_dir, output_dir, num_forgeries_per_image=1):
-    """
-    Generates clean and forged images from the input directory.
 
-    Args:
-        input_dir (str): Directory containing the original clean images.
-        output_dir (str): Directory to save the generated data.
-        num_forgeries_per_image (int): Number of forgery types to apply per image (currently supports 2: copy-move, inpainting).
-    """
+def generate_forged_dataset(input_dir, output_dir, num_forgeries_per_image=2, use_inpainting=True, max_images=2500):
     os.makedirs(output_dir, exist_ok=True)
-    clean_output_dir = os.path.join(output_dir, 'clean')
-    forged_output_dir = os.path.join(output_dir, 'forged')
-    os.makedirs(clean_output_dir, exist_ok=True)
-    os.makedirs(forged_output_dir, exist_ok=True)
+    clean_dir = os.path.join(output_dir, "clean")
+    forged_dir = os.path.join(output_dir, "forged")
+    os.makedirs(clean_dir, exist_ok=True)
+    os.makedirs(forged_dir, exist_ok=True)
+
+    # Load inpainting model (optional)
+    inpaint_pipe = load_inpainting_model() if use_inpainting else None
 
     image_files = [f for f in os.listdir(input_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-    random.shuffle(image_files) # Shuffle to process images in a random order
+    random.shuffle(image_files)
+    
+    # Limit the number of images
+    if max_images and max_images < len(image_files):
+        print(f"[INFO] Limiting dataset to {max_images} images")
+        image_files = image_files[:max_images]
 
-    list_file_path = os.path.join(output_dir, 'list.txt')
+    list_file = os.path.join(output_dir, "list.txt")
+    with open(list_file, "w") as f:
+        for i, filename in enumerate(image_files):
+            base, ext = os.path.splitext(filename)
+            src = os.path.join(input_dir, filename)
 
-    with open(list_file_path, 'w') as f:
-        for i, image_file in enumerate(image_files):
-            input_image_path = os.path.join(input_dir, image_file)
-            base_name, ext = os.path.splitext(image_file)
+            # Save clean
+            clean_path = os.path.join(clean_dir, f"{base}_clean{ext}")
+            shutil.copy(src, clean_path)
+            f.write(f"{os.path.relpath(clean_path, output_dir)} 0\n")
 
-            # 1. Save Clean Image
-            clean_image_name = f"{base_name}_clean{ext}"
-            clean_image_path = os.path.join(clean_output_dir, clean_image_name)
-            if not os.path.exists(clean_image_path):
-                 shutil.copy(input_image_path, clean_image_path)
-            f.write(f"{os.path.relpath(clean_image_path, output_dir)} 0\n") # 0 for clean
+            # Copy-Move Forgery
+            if num_forgeries_per_image >= 1:
+                cm_path = os.path.join(forged_dir, f"{base}_copymove{ext}")
+                if create_copy_move_forgery(src, cm_path):
+                    f.write(f"{os.path.relpath(cm_path, output_dir)} 1\n")
 
-            # 2. Generate and Save Forged Images
-            if num_forgeries_per_image > 0:
-                # Copy-Move Forgery
-                copy_move_image_name = f"{base_name}_copymove{ext}"
-                copy_move_image_path = os.path.join(forged_output_dir, copy_move_image_name)
-                if not os.path.exists(copy_move_image_path):
-                    if create_copy_move_forgery(input_image_path, copy_move_image_path):
-                        f.write(f"{os.path.relpath(copy_move_image_path, output_dir)} 1\n") # 1 for forged
-                    else:
-                        print(f"Skipping copy-move entry for {image_file} due to failure.")
-                else:
-                    print(f"Copy-move forgery for {image_file} already exists. Skipping generation.")
-                    f.write(f"{os.path.relpath(copy_move_image_path, output_dir)} 1\n") # Add to list if exists
+            # Inpainting Forgery
+            if num_forgeries_per_image >= 2 and inpaint_pipe is not None:
+                inpaint_path = os.path.join(forged_dir, f"{base}_inpainting{ext}")
+                if create_inpainting_forgery(src, inpaint_path, inpaint_pipe):
+                    f.write(f"{os.path.relpath(inpaint_path, output_dir)} 1\n")
 
-            if num_forgeries_per_image > 1:
-                 # Inpainting Forgery
-                 inpainting_image_name = f"{base_name}_inpainting{ext}"
-                 inpainting_image_path = os.path.join(forged_output_dir, inpainting_image_name)
-                 if not os.path.exists(inpainting_image_path):
-                     if create_inpainting_forgery(input_image_path, inpainting_image_path):
-                         f.write(f"{os.path.relpath(inpainting_image_path, output_dir)} 1\n") # 1 for forged
-                     else:
-                         print(f"Skipping inpainting entry for {image_file} due to failure.")
-                 else:
-                     print(f"Inpainting forgery for {image_file} already exists. Skipping generation.")
-                     f.write(f"{os.path.relpath(inpainting_image_path, output_dir)} 1\n") # Add to list if exists
+            if (i + 1) % 50 == 0:
+                print(f"[INFO] Processed {i + 1}/{len(image_files)} images.")
 
+    print(f"[DONE] Forgery generation complete. Output: {output_dir}")
 
-            if (i + 1) % 100 == 0:
-                print(f"Processed {i + 1}/{len(image_files)} images.")
-
-    print(f"Forgery generation complete. Data saved to {output_dir}")
-    print(f"List file created at {list_file_path}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Generate clean and forged images from a dataset.')
-    # Updated default input_dir to point to the correct subdirectory
-    parser.add_argument('--input_dir', default='coco_dataset/val2017/val2017', help='Directory containing the original clean images.')
-    parser.add_argument('--output_dir', default='forged_data', help='Directory to save the generated data.')
-    parser.add_argument('--num_forgeries_per_image', type=int, default=2, help='Number of forgery types to apply per image (0, 1, or 2).')
+    parser = argparse.ArgumentParser(description="Generate clean and forged image dataset.")
+    parser.add_argument('--input_dir', default='coco_dataset/coco_dataset/val2017', help='Input directory with clean images.')
+    parser.add_argument('--output_dir', default='forged_data', help='Directory to store clean and forged images.')
+    parser.add_argument('--num_forgeries_per_image', type=int, default=2, help='Number of forgery types (0, 1, or 2).')
+    parser.add_argument('--no_inpainting', action='store_true', help='Disable inpainting forgeries.')
+    parser.add_argument('--max_images', type=int, default=2500, help='Maximum number of images to process')
+
     args = parser.parse_args()
 
-    generate_forged_dataset(args.input_dir, args.output_dir, args.num_forgeries_per_image)
+    generate_forged_dataset(
+        input_dir=args.input_dir,
+        output_dir=args.output_dir,
+        num_forgeries_per_image=args.num_forgeries_per_image,
+        use_inpainting=not args.no_inpainting,
+        max_images=args.max_images
+    )
